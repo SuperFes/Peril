@@ -33,6 +33,11 @@ func main() {
 		0,
 	)
 
+	if err != nil {
+		fmt.Println("Failed to declare and bind queue")
+		panic(err)
+	}
+
 	// Create a channel
 	ch, err := conn.Channel()
 
@@ -40,6 +45,10 @@ func main() {
 
 	for {
 		command := gamelogic.GetInput()
+
+		if command == nil || len(command) == 0 {
+			continue
+		}
 
 		if command[0] == "help" {
 			gamelogic.PrintServerHelp()

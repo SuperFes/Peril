@@ -7,7 +7,7 @@ import (
 )
 
 func PublishJSON[T any](ch *amqp.Channel, exchange, key string, val T) error {
-	json, err := json.Marshal(val)
+	data, err := json.Marshal(val)
 
 	if err != nil {
 		fmt.Println("Unable to marshal JSON")
@@ -22,9 +22,51 @@ func PublishJSON[T any](ch *amqp.Channel, exchange, key string, val T) error {
 	immediate := false
 
 	msg := amqp.Publishing{
-		ContentType: "application/json",
-		Body:        json,
+		ContentType: "application/data",
+		Body:        data,
 	}
 
 	return ch.Publish(exchange, key, mandatory, immediate, msg)
+}
+
+func SubscribeJSON[T any](
+	conn *amqp.Connection,
+	exchange,
+	queueName,
+	key string,
+	simpleQueueType int,
+	handler func(T),
+) error {
+	ch, _, err := DeclareAndBind(conn, exchange, queueName, key, simpleQueueType)
+
+	if err != nil {
+		return err
+	}
+
+	msgs, err := ch.Consume(queueName, "", true, false, false, false, nil)
+
+	if err != nil {
+		return err
+	}
+
+	go func() {
+		for d := range msgs {
+			var val T
+			err := json.Unmarshal(d.Body, &val)
+
+			if err != nil {
+				fmt.Println("Unable to unmarshal JSON")
+				fmt.Println(err)
+				continue
+			}
+
+			d.Ack(false)
+
+			handler(val)
+		}
+
+		defer ch.Close()
+	}()
+
+	return nil
 }

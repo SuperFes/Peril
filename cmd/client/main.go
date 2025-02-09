@@ -8,6 +8,14 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
+func handlerPause(gs *gamelogic.GameState) func(routing.PlayingState) {
+	return func(ps routing.PlayingState) {
+		defer fmt.Print("> ")
+
+		gs.HandlePause(ps)
+	}
+}
+
 func main() {
 	fmt.Println("Starting Peril client...")
 
@@ -32,12 +40,12 @@ func main() {
 		}
 	}
 
-	fmt.Println("Welcome to Peril, " + userName + "!")
+	pauseRoute := routing.PauseKey + "." + userName
 
 	_, _, err = pubsub.DeclareAndBind(
 		conn,
 		routing.ExchangePerilDirect,
-		routing.PauseKey+"."+userName,
+		pauseRoute,
 		routing.PauseKey,
 		1,
 	)
@@ -48,8 +56,16 @@ func main() {
 
 	gameState := gamelogic.NewGameState(userName)
 
+	fmt.Println("Welcome to Peril, " + userName + "!")
+
 	for {
+		pubsub.SubscribeJSON(conn, routing.ExchangePerilDirect, pauseRoute, routing.PauseKey, 1, handlerPause(gameState))
+
 		command := gamelogic.GetInput()
+
+		if command == nil || len(command) == 0 {
+			continue
+		}
 
 		if command[0] == "help" {
 			gamelogic.PrintClientHelp()
@@ -58,13 +74,13 @@ func main() {
 				fmt.Println("spawn <location> <type>")
 			}
 
-			gameState.CommandSpawn(command)
+			err = gameState.CommandSpawn(command)
 		} else if command[0] == "move" {
 			if len(command) < 3 {
 				fmt.Println("move <location> <unitId> (<unitId> ...)")
 			}
 
-			gameState.CommandMove(command)
+			_, err = gameState.CommandMove(command)
 		} else if command[0] == "status" {
 			gameState.CommandStatus()
 		} else if command[0] == "spawn" {
@@ -72,7 +88,7 @@ func main() {
 				fmt.Println("spawn <location> <rank>")
 			}
 
-			gameState.CommandSpawn(command)
+			err = gameState.CommandSpawn(command)
 		} else if command[0] == "spam" {
 			if len(command) < 2 {
 				fmt.Println("spam <n>")
@@ -85,6 +101,10 @@ func main() {
 			break
 		} else {
 			fmt.Println("Unknown command")
+		}
+
+		if err != nil {
+			fmt.Println(err)
 		}
 	}
 }
