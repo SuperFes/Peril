@@ -8,11 +8,27 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
-func handlerPause(gs *gamelogic.GameState) func(routing.PlayingState) {
-	return func(ps routing.PlayingState) {
+func handlerPause(gs *gamelogic.GameState) func(routing.PlayingState) pubsub.AckType {
+	return func(ps routing.PlayingState) pubsub.AckType {
 		defer fmt.Print("> ")
 
 		gs.HandlePause(ps)
+
+		return pubsub.Ack
+	}
+}
+
+func handlerMove(gs *gamelogic.GameState) func(move gamelogic.ArmyMove) pubsub.AckType {
+	return func(move gamelogic.ArmyMove) pubsub.AckType {
+		defer fmt.Print("> ")
+
+		outcome := gs.HandleMove(move)
+
+		if outcome == gamelogic.MoveOutcomeSafe || outcome == gamelogic.MoveOutcomeMakeWar {
+			return pubsub.Ack
+		}
+
+		return pubsub.NackDiscard
 	}
 }
 
@@ -41,6 +57,7 @@ func main() {
 	}
 
 	pauseRoute := routing.PauseKey + "." + userName
+	movesRoute := routing.ArmyMovesPrefix + "." + userName
 
 	_, _, err = pubsub.DeclareAndBind(
 		conn,
@@ -52,15 +69,21 @@ func main() {
 
 	if err != nil {
 		fmt.Println("Failed to declare and bind queue")
+		panic(err)
 	}
+
+	var move gamelogic.ArmyMove
+
+	ch, err := conn.Channel()
 
 	gameState := gamelogic.NewGameState(userName)
 
 	fmt.Println("Welcome to Peril, " + userName + "!")
 
-	for {
-		pubsub.SubscribeJSON(conn, routing.ExchangePerilDirect, pauseRoute, routing.PauseKey, 1, handlerPause(gameState))
+	pubsub.SubscribeJSON(conn, routing.ExchangePerilDirect, pauseRoute, routing.PauseKey, 1, handlerPause(gameState))
+	pubsub.SubscribeJSON(conn, routing.ExchangePerilTopic, movesRoute, routing.ArmyMovesPrefix+".*", 1, handlerMove(gameState))
 
+	for {
 		command := gamelogic.GetInput()
 
 		if command == nil || len(command) == 0 {
@@ -80,7 +103,9 @@ func main() {
 				fmt.Println("move <location> <unitId> (<unitId> ...)")
 			}
 
-			_, err = gameState.CommandMove(command)
+			move, err = gameState.CommandMove(command)
+
+			pubsub.PublishJSON(ch, routing.ExchangePerilTopic, movesRoute, move)
 		} else if command[0] == "status" {
 			gameState.CommandStatus()
 		} else if command[0] == "spawn" {
@@ -98,6 +123,7 @@ func main() {
 			// gameState.CommandSpam(command)
 		} else if command[0] == "quit" {
 			gamelogic.PrintQuit()
+
 			break
 		} else {
 			fmt.Println("Unknown command")
