@@ -11,8 +11,17 @@ func DeclareAndBind(
 	queueName,
 	key string,
 	simpleQueueType int, // an enum to represent "durable" or "transient"
+	dlx bool,
 ) (*amqp.Channel, amqp.Queue, error) {
 	ch, err := conn.Channel()
+
+	var args amqp.Table
+
+	if dlx {
+		args = amqp.Table{
+			"x-dead-letter-exchange": routing.ExchangePerilDeadLetter,
+		}
+	}
 
 	queue, err := ch.QueueDeclare(
 		queueName,
@@ -20,9 +29,7 @@ func DeclareAndBind(
 		simpleQueueType == 1, // autoDelete
 		simpleQueueType == 1, // exclusive
 		false,                // noWait
-		amqp.Table{
-			"x-dead-letter-exchange": routing.ExchangePerilDeadLetter,
-		},
+		args,
 	)
 
 	if err != nil {

@@ -31,6 +31,7 @@ func main() {
 		routing.GameLogSlug,
 		routing.GameLogSlug+".*",
 		0,
+		false,
 	)
 
 	if err != nil {
@@ -40,6 +41,8 @@ func main() {
 
 	// Create a channel
 	ch, err := conn.Channel()
+
+	pubsub.SubscribeGob(conn, routing.ExchangePerilDirect, routing.GameLogSlug, routing.GameLogSlug+".*", 0, handlerGameLog(), pubsub.UnmarshallGameLog)
 
 	gamelogic.PrintServerHelp()
 
@@ -70,4 +73,14 @@ func main() {
 	}
 
 	fmt.Println("Shutting down Peril server...")
+}
+
+func handlerGameLog() func(routing.GameLog) pubsub.AckType {
+	return func(gl routing.GameLog) pubsub.AckType {
+		defer fmt.Print("> ")
+
+		gamelogic.WriteLog(gl)
+
+		return pubsub.Ack
+	}
 }

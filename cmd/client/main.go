@@ -6,6 +6,8 @@ import (
 	"github.com/bootdotdev/learn-pub-sub-starter/internal/pubsub"
 	"github.com/bootdotdev/learn-pub-sub-starter/internal/routing"
 	amqp "github.com/rabbitmq/amqp091-go"
+	"strconv"
+	"time"
 )
 
 func handlerPause(gs *gamelogic.GameState) func(routing.PlayingState) pubsub.AckType {
@@ -18,15 +20,94 @@ func handlerPause(gs *gamelogic.GameState) func(routing.PlayingState) pubsub.Ack
 	}
 }
 
-func handlerMove(gs *gamelogic.GameState) func(move gamelogic.ArmyMove) pubsub.AckType {
+func handlerMove(gs *gamelogic.GameState, conn *amqp.Connection) func(move gamelogic.ArmyMove) pubsub.AckType {
 	return func(move gamelogic.ArmyMove) pubsub.AckType {
 		defer fmt.Print("> ")
 
 		outcome := gs.HandleMove(move)
 
-		if outcome == gamelogic.MoveOutcomeSafe || outcome == gamelogic.MoveOutcomeMakeWar {
+		if outcome == gamelogic.MoveOutcomeSafe {
+			return pubsub.Ack
+		} else if outcome == gamelogic.MoveOutcomeMakeWar {
+			fmt.Println("War!")
+
+			ch, _, err := pubsub.DeclareAndBind(
+				conn,
+				routing.ExchangePerilTopic,
+				routing.WarRecognitionsPrefix,
+				routing.WarRecognitionsPrefix+".*",
+				0,
+				true,
+			)
+
+			if err != nil {
+				fmt.Println(err)
+			}
+
+			err = pubsub.PublishJSON(ch, routing.ExchangePerilTopic, routing.WarRecognitionsPrefix+"."+gs.GetUsername(), gamelogic.RecognitionOfWar{
+				Attacker: move.Player,
+				Defender: gs.Player,
+			})
+
+			if err != nil {
+				fmt.Println(err)
+
+				return pubsub.NackRequeue
+			}
+
 			return pubsub.Ack
 		}
+
+		return pubsub.NackDiscard
+	}
+}
+
+func handlerWar(gs *gamelogic.GameState, conn *amqp.Connection) func(decl gamelogic.RecognitionOfWar) pubsub.AckType {
+	return func(decl gamelogic.RecognitionOfWar) pubsub.AckType {
+		defer fmt.Print("> ")
+
+		draw, win, lose := gs.HandleWar(decl)
+
+		ch, _, err := pubsub.DeclareAndBind(
+			conn,
+			routing.ExchangePerilTopic,
+			routing.GameLogSlug,
+			routing.GameLogSlug+"."+gs.GetUsername(),
+			0,
+			false,
+		)
+
+		if err != nil {
+			fmt.Println(err)
+		}
+
+		msg := fmt.Sprintf("A war between %s and %s resulted in a draw", win, lose)
+
+		if draw == gamelogic.WarOutcomeYouWon || draw == gamelogic.WarOutcomeOpponentWon {
+			msg = fmt.Sprintf("%s won a war against %s", win, lose)
+		}
+
+		err = pubsub.PublishGob(ch, routing.ExchangePerilTopic, routing.GameLogSlug+"."+gs.GetUsername(), routing.GameLog{
+			CurrentTime: time.Now(),
+			Message:     msg,
+			Username:    decl.Attacker.Username,
+		})
+
+		if err != nil {
+			return pubsub.NackRequeue
+		}
+
+		if draw == gamelogic.WarOutcomeNotInvolved {
+			return pubsub.NackRequeue
+		} else if draw == gamelogic.WarOutcomeNoUnits {
+			return pubsub.NackDiscard
+		} else if draw == gamelogic.WarOutcomeOpponentWon ||
+			draw == gamelogic.WarOutcomeYouWon ||
+			draw == gamelogic.WarOutcomeDraw {
+			return pubsub.Ack
+		}
+
+		fmt.Println("Error, unknown thing happened in war")
 
 		return pubsub.NackDiscard
 	}
@@ -59,12 +140,13 @@ func main() {
 	pauseRoute := routing.PauseKey + "." + userName
 	movesRoute := routing.ArmyMovesPrefix + "." + userName
 
-	_, _, err = pubsub.DeclareAndBind(
+	ch, _, err := pubsub.DeclareAndBind(
 		conn,
 		routing.ExchangePerilDirect,
 		pauseRoute,
 		routing.PauseKey,
 		1,
+		true,
 	)
 
 	if err != nil {
@@ -74,14 +156,13 @@ func main() {
 
 	var move gamelogic.ArmyMove
 
-	ch, err := conn.Channel()
-
 	gameState := gamelogic.NewGameState(userName)
 
 	fmt.Println("Welcome to Peril, " + userName + "!")
 
 	pubsub.SubscribeJSON(conn, routing.ExchangePerilDirect, pauseRoute, routing.PauseKey, 1, handlerPause(gameState))
-	pubsub.SubscribeJSON(conn, routing.ExchangePerilTopic, movesRoute, routing.ArmyMovesPrefix+".*", 1, handlerMove(gameState))
+	pubsub.SubscribeJSON(conn, routing.ExchangePerilTopic, movesRoute, routing.ArmyMovesPrefix+".*", 1, handlerMove(gameState, conn))
+	pubsub.SubscribeJSON(conn, routing.ExchangePerilTopic, routing.WarRecognitionsPrefix, routing.WarRecognitionsPrefix+".*", 0, handlerWar(gameState, conn))
 
 	for {
 		command := gamelogic.GetInput()
@@ -105,7 +186,11 @@ func main() {
 
 			move, err = gameState.CommandMove(command)
 
-			pubsub.PublishJSON(ch, routing.ExchangePerilTopic, movesRoute, move)
+			if err != nil {
+				fmt.Println(err)
+			}
+
+			err = pubsub.PublishJSON(ch, routing.ExchangePerilTopic, movesRoute, move)
 		} else if command[0] == "status" {
 			gameState.CommandStatus()
 		} else if command[0] == "spawn" {
@@ -119,8 +204,30 @@ func main() {
 				fmt.Println("spam <n>")
 			}
 
-			fmt.Println("Spam no workie")
-			// gameState.CommandSpam(command)
+			count, err := strconv.Atoi(command[1])
+
+			if err != nil {
+				fmt.Println("Please enter a valid number")
+				continue
+			}
+
+			userName := gameState.GetUsername()
+
+			fmt.Println("Spamming...")
+
+			for i := 0; i < count; i++ {
+				err = pubsub.PublishGob(ch, routing.ExchangePerilTopic, routing.GameLogSlug+"."+userName, routing.GameLog{
+					CurrentTime: time.Now(),
+					Message:     gamelogic.GetMaliciousLog(),
+					Username:    userName,
+				})
+
+				if err != nil {
+					fmt.Println(err)
+				}
+			}
+
+			fmt.Println("Spammed!")
 		} else if command[0] == "quit" {
 			gamelogic.PrintQuit()
 
